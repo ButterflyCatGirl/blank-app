@@ -125,11 +125,11 @@ st.markdown(f'<div class="{disclaimer_class}">{t["disclaimer"]}</div>', unsafe_a
 @st.cache_resource
 def load_blip2_model():
     try:
-        processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
+        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
         model = Blip2ForConditionalGeneration.from_pretrained(
-            "Salesforce/blip2-flan-t5-xl",
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None
+        "Salesforce/blip2-opt-2.7b",
+        torch_dtype=torch.float16,
+        device_map="auto"
         )
         return processor, model
     except Exception as e:
