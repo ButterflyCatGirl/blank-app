@@ -1,265 +1,277 @@
 import streamlit as st
-import torch
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
 from PIL import Image
+import torch
 import io
 import base64
-import json
-from medical_terms import EGYPTIAN_MEDICAL_TERMS
+from transformers import Blip2Processor, Blip2ForConditionalGeneration
+import time
+from medical_terms import get_medical_translation, get_medical_response_template
 
-# Configure Streamlit page
+# Configure page
 st.set_page_config(
-    page_title="AI Medical Assistant - مساعد طبي ذكي",
+    page_title="AI Health Assistant - مساعد الصحة الذكي",
     page_icon="🏥",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-# Initialize session state
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
+# Custom CSS for Arabic support and medical theme
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+Arabic:wght@300;400;500;600;700&display=swap');
 
+.stApp {
+    font-family: 'Inter', 'Noto Sans Arabic', sans-serif;
+}
+
+.arabic-text {
+    font-family: 'Noto Sans Arabic', sans-serif;
+    direction: rtl;
+    text-align: right;
+}
+
+.chat-message {
+    padding: 1rem;
+    margin: 0.5rem 0;
+    border-radius: 10px;
+    max-width: 80%;
+}
+
+.user-message {
+    background-color: #e3f2fd;
+    margin-left: auto;
+    margin-right: 0;
+}
+
+.bot-message {
+    background-color: #f5f5f5;
+    margin-left: 0;
+    margin-right: auto;
+}
+
+.medical-disclaimer {
+    background-color: #fff3cd;
+    border: 1px solid #ffeaa7;
+    border-radius: 5px;
+    padding: 10px;
+    margin: 10px 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "language" not in st.session_state:
+    st.session_state.language = "en"
+if "model_loaded" not in st.session_state:
+    st.session_state.model_loaded = False
+if "processor" not in st.session_state:
+    st.session_state.processor = None
+if "model" not in st.session_state:
+    st.session_state.model = None
+
+# Language toggle
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    if st.button("🇪🇬 العربية" if st.session_state.language == "en" else "🇺🇸 English"):
+        st.session_state.language = "ar" if st.session_state.language == "en" else "en"
+        st.rerun()
+
+# Translations
+translations = {
+    "en": {
+        "title": "🏥 AI Health Assistant",
+        "subtitle": "Your multilingual medical image analysis companion",
+        "welcome": "Hello! I'm your AI health assistant. Upload a medical image or ask a health question.",
+        "upload_prompt": "Upload a medical image (X-ray, CT scan, MRI, etc.)",
+        "text_input": "Ask your health question...",
+        "analyzing": "🔬 Analyzing your medical image...",
+        "disclaimer": "⚠️ Medical Disclaimer: This AI assistant provides general information only and should not replace professional medical advice. Always consult with qualified healthcare professionals for medical decisions.",
+        "loading_model": "🤖 Loading AI model... This may take a moment.",
+        "send": "Send",
+        "clear": "Clear Chat"
+    },
+    "ar": {
+        "title": "🏥 مساعد الصحة الذكي",
+        "subtitle": "رفيقك متعدد اللغات لتحليل الصور الطبية",
+        "welcome": "مرحباً! أنا مساعدك الصحي الذكي. ارفع صورة طبية أو اسأل سؤالاً صحياً.",
+        "upload_prompt": "ارفع صورة طبية (أشعة سينية، أشعة مقطعية، رنين مغناطيسي، إلخ)",
+        "text_input": "اسأل سؤالك الصحي...",
+        "analyzing": "🔬 جاري تحليل صورتك الطبية...",
+        "disclaimer": "⚠️ إخلاء مسؤولية طبية: يقدم هذا المساعد الذكي معلومات عامة فقط ولا يجب أن يحل محل المشورة الطبية المهنية. استشر دائماً أخصائيي الرعاية الصحية المؤهلين لاتخاذ القرارات الطبية.",
+        "loading_model": "🤖 جاري تحميل النموذج الذكي... قد يستغرق هذا بعض الوقت.",
+        "send": "إرسال",
+        "clear": "مسح المحادثة"
+    }
+}
+
+t = translations[st.session_state.language]
+is_rtl = st.session_state.language == "ar"
+
+# Header
+if is_rtl:
+    st.markdown(f'<h1 class="arabic-text">{t["title"]}</h1>', unsafe_allow_html=True)
+    st.markdown(f'<p class="arabic-text">{t["subtitle"]}</p>', unsafe_allow_html=True)
+else:
+    st.title(t["title"])
+    st.markdown(t["subtitle"])
+
+# Medical Disclaimer
+disclaimer_class = "medical-disclaimer arabic-text" if is_rtl else "medical-disclaimer"
+st.markdown(f'<div class="{disclaimer_class}">{t["disclaimer"]}</div>', unsafe_allow_html=True)
+
+# Load BLIP2 model
 @st.cache_resource
-def load_model():
-    """Load BLIP2 model with caching for better performance"""
+def load_blip2_model():
     try:
         processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
         model = Blip2ForConditionalGeneration.from_pretrained(
             "Salesforce/blip2-flan-t5-xl",
-            torch_dtype=torch.float16,
-            device_map="auto"
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto" if torch.cuda.is_available() else None
         )
         return processor, model
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None, None
 
-def detect_language(text):
-    """Detect if text contains Arabic characters"""
-    arabic_pattern = r'[\u0600-\u06FF]'
-    import re
-    return "ar" if re.search(arabic_pattern, text) else "en"
-
-def translate_medical_term(term, target_lang="ar"):
-    """Translate medical terms to Egyptian Arabic"""
-    if target_lang == "ar" and term.lower() in EGYPTIAN_MEDICAL_TERMS:
-        return EGYPTIAN_MEDICAL_TERMS[term.lower()]
-    return term
-
-def analyze_medical_image(image, question, language="en"):
-    """Analyze medical image using BLIP2 model"""
-    processor, model = load_model()
-    
-    if processor is None or model is None:
-        return get_error_message(language)
-    
-    try:
-        # Prepare the image and question for BLIP2
-        if question:
-            prompt = f"Question: {question} Answer:"
+# Initialize model
+if not st.session_state.model_loaded:
+    with st.spinner(t["loading_model"]):
+        processor, model = load_blip2_model()
+        if processor and model:
+            st.session_state.processor = processor
+            st.session_state.model = model
+            st.session_state.model_loaded = True
+            st.success("✅ AI Model loaded successfully!")
         else:
-            prompt = "Describe this medical image in detail:"
-        
-        # Process image and text
-        inputs = processor(image, prompt, return_tensors="pt")
-        
-        # Generate response
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs, max_length=200, do_sample=True, temperature=0.7)
-        
-        # Decode response
-        generated_text = processor.decode(generated_ids[0], skip_special_tokens=True)
-        
-        # Clean up the response
-        if "Answer:" in generated_text:
-            response = generated_text.split("Answer:")[-1].strip()
-        else:
-            response = generated_text.strip()
-        
-        # Add medical disclaimer
-        disclaimer = get_medical_disclaimer(language)
-        
-        # Translate to Arabic if needed
-        if language == "ar":
-            response = translate_to_arabic(response)
-        
-        return f"{response}\n\n{disclaimer}"
-        
-    except Exception as e:
-        st.error(f"Error analyzing image: {str(e)}")
-        return get_error_message(language)
+            st.error("❌ Failed to load AI model")
 
-def translate_to_arabic(text):
-    """Basic medical translation to Egyptian Arabic"""
-    # Simple keyword-based translation for common medical terms
-    translations = {
-        "x-ray": "أشعة سينية",
-        "ct scan": "أشعة مقطعية",
-        "mri": "رنين مغناطيسي",
-        "bone": "عظم",
-        "fracture": "كسر",
-        "normal": "طبيعي",
-        "abnormal": "غير طبيعي",
-        "chest": "صدر",
-        "lung": "رئة",
-        "heart": "قلب",
-        "brain": "مخ",
-        "spine": "عمود فقري"
-    }
-    
-    result = text.lower()
-    for eng, ar in translations.items():
-        result = result.replace(eng, ar)
-    
-    return result
+# Chat interface
+st.markdown("---")
 
-def get_medical_disclaimer(language="en"):
-    """Get medical disclaimer in appropriate language"""
-    disclaimers = {
-        "en": "⚠️ Medical Disclaimer: This analysis is for educational purposes only and should not replace professional medical consultation. Always consult with qualified healthcare professionals for medical advice.",
-        "ar": "⚠️ إخلاء مسؤولية طبية: هذا التحليل لأغراض تعليمية فقط ولا يجب أن يحل محل الاستشارة الطبية المهنية. استشر دائماً أطباء مؤهلين للحصول على المشورة الطبية."
-    }
-    return disclaimers.get(language, disclaimers["en"])
+# Display chat messages
+for message in st.session_state.messages:
+    message_class = "chat-message user-message" if message["role"] == "user" else "chat-message bot-message"
+    if message.get("is_arabic", False):
+        message_class += " arabic-text"
+    
+    st.markdown(f'<div class="{message_class}">{message["content"]}</div>', unsafe_allow_html=True)
+    
+    if "image" in message:
+        st.image(message["image"], width=300)
 
-def get_error_message(language="en"):
-    """Get error message in appropriate language"""
-    errors = {
-        "en": "Sorry, I'm having trouble analyzing the image. Please try again later or consult with a healthcare professional.",
-        "ar": "عذراً، أواجه مشكلة في تحليل الصورة. يرجى المحاولة مرة أخرى لاحقاً أو استشارة أخصائي رعاية صحية."
-    }
-    return errors.get(language, errors["en"])
+# Input section
+col1, col2 = st.columns([3, 1])
 
-def process_text_query(question, language="en"):
-    """Process text-only medical queries"""
-    responses = {
-        "en": [
-            "Thank you for your health question. For personalized medical advice, I recommend consulting with a healthcare professional who can properly assess your specific situation.",
-            "I understand your concern about your health. While I can provide general information, it's important to speak with a qualified medical practitioner for proper diagnosis and treatment.",
-            "Your health question is important. Please consider scheduling an appointment with a healthcare provider who can give you personalized medical guidance."
-        ],
-        "ar": [
-            "شكراً لك على سؤالك الصحي. للحصول على استشارة طبية شخصية، أنصح بالتشاور مع أخصائي رعاية صحية يمكنه تقييم حالتك الخاصة بشكل صحيح.",
-            "أفهم قلقك بشأن صحتك. بينما يمكنني تقديم معلومات عامة، من المهم التحدث مع ممارس طبي مؤهل للحصول على التشخيص والعلاج المناسب.",
-            "سؤالك الصحي مهم. يرجى النظر في تحديد موعد مع مقدم الرعاية الصحية الذي يمكنه إعطاؤك إرشادات طبية شخصية."
-        ]
-    }
-    
-    import random
-    lang_responses = responses.get(language, responses["en"])
-    response = random.choice(lang_responses)
-    
-    disclaimer = get_medical_disclaimer(language)
-    return f"{response}\n\n{disclaimer}"
-
-# API Endpoints for React Frontend
-if st.query_params.get("api") == "chat":
-    # Handle API requests from React frontend
-    if st.query_params.get("method") == "POST":
-        try:
-            # Get request data
-            request_data = st.query_params.get("data")
-            if request_data:
-                data = json.loads(request_data)
-                message = data.get("message", "")
-                language = detect_language(message)
-                
-                # Process image if present
-                if "image" in data:
-                    # Decode base64 image
-                    image_data = base64.b64decode(data["image"])
-                    image = Image.open(io.BytesIO(image_data))
-                    response = analyze_medical_image(image, message, language)
-                else:
-                    response = process_text_query(message, language)
-                
-                # Return JSON response
-                st.json({
-                    "response": response,
-                    "language": language,
-                    "status": "success"
-                })
-        except Exception as e:
-            st.json({
-                "error": str(e),
-                "status": "error"
-            })
-    st.stop()
-
-# Main Streamlit Interface
-def main():
-    # Header with Egyptian theme
-    st.markdown("""
-    <div style='text-align: center; padding: 2rem; background: linear-gradient(135deg, #DC143C 0%, #000000 50%, #FFD700 100%); border-radius: 10px; margin-bottom: 2rem;'>
-        <h1 style='color: white; font-size: 2.5rem; margin: 0;'>🏥 AI Medical Assistant</h1>
-        <h2 style='color: #FFD700; font-size: 1.8rem; margin: 0.5rem 0;'>مساعد طبي ذكي</h2>
-        <p style='color: white; font-size: 1.1rem; margin: 0;'>Advanced Medical Image Analysis with Egyptian Arabic Support</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Language selection
-    language = st.selectbox(
-        "Select Language / اختر اللغة",
-        options=["en", "ar"],
-        format_func=lambda x: "English 🇺🇸" if x == "en" else "العربية 🇪🇬",
-        index=0
-    )
-    
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Upload Medical Image / ارفع الصورة الطبية",
-        type=['png', 'jpg', 'jpeg', 'bmp', 'tiff'],
-        help="Upload medical images like X-rays, CT scans, MRI images, etc."
-    )
-    
+with col1:
     # Text input
-    if language == "ar":
-        question = st.text_area(
-            "اكتب سؤالك الطبي هنا:",
-            placeholder="مثال: ما هو الموضح في هذه الأشعة السينية؟",
-            height=100
-        )
-    else:
-        question = st.text_area(
-            "Ask your medical question:",
-            placeholder="Example: What does this X-ray show?",
-            height=100
-        )
-    
-    # Process button
-    if st.button("🔍 Analyze / تحليل", type="primary"):
-        if uploaded_file is not None:
-            # Display uploaded image
-            image = Image.open(uploaded_file)
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                st.image(image, caption="Uploaded Medical Image", use_column_width=True)
-            
-            with col2:
-                with st.spinner("Analyzing medical image... / جاري تحليل الصورة الطبية..."):
-                    response = analyze_medical_image(image, question, language)
-                    st.markdown("### Analysis Result / نتيجة التحليل")
-                    st.write(response)
-        
-        elif question:
-            with st.spinner("Processing your question... / جاري معالجة سؤالك..."):
-                response = process_text_query(question, language)
-                st.markdown("### Response / الرد")
-                st.write(response)
-        else:
-            if language == "ar":
-                st.warning("يرجى رفع صورة طبية أو كتابة سؤال.")
-            else:
-                st.warning("Please upload a medical image or ask a question.")
-    
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: gray;'>"
-        "🏥 AI Medical Assistant | مساعد طبي ذكي<br>"
-        "Powered by BLIP2 & Streamlit | مدعوم بتقنية BLIP2 و Streamlit"
-        "</div>",
-        unsafe_allow_html=True
+    text_input = st.text_input(
+        t["text_input"],
+        key="text_input",
+        label_visibility="collapsed"
     )
 
-if __name__ == "__main__":
-    main()
+# Image upload
+uploaded_file = st.file_uploader(
+    t["upload_prompt"],
+    type=["jpg", "jpeg", "png", "bmp", "tiff"],
+    accept_multiple_files=False
+)
+
+# Send button
+col1, col2, col3 = st.columns([1, 1, 1])
+with col2:
+    send_button = st.button(t["send"], use_container_width=True)
+
+# Clear chat button
+with col3:
+    if st.button(t["clear"], use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+# Process input
+if send_button and (text_input or uploaded_file):
+    # Detect language
+    def detect_language(text):
+        arabic_pattern = r'[\u0600-\u06FF]'
+        import re
+        return "ar" if re.search(arabic_pattern, text) else "en"
+    
+    detected_lang = detect_language(text_input) if text_input else st.session_state.language
+    is_arabic = detected_lang == "ar"
+    
+    # Add user message
+    user_message = {
+        "role": "user",
+        "content": text_input if text_input else "صورة طبية مرفقة" if is_arabic else "Medical image uploaded",
+        "is_arabic": is_arabic
+    }
+    
+    if uploaded_file:
+        image = Image.open(uploaded_file)
+        user_message["image"] = image
+    
+    st.session_state.messages.append(user_message)
+    
+    # Generate response
+    with st.spinner(t["analyzing"]):
+        try:
+            if uploaded_file and st.session_state.model_loaded:
+                # BLIP2 image analysis
+                image = Image.open(uploaded_file).convert('RGB')
+                
+                # Medical context prompts
+                medical_prompts = {
+                    "en": "This is a medical image. Describe what you see in detail, including any abnormalities, anatomical structures, and potential medical findings. Be specific about medical terminology.",
+                    "ar": "هذه صورة طبية. صف ما تراه بالتفصيل، بما في ذلك أي تشوهات أو هياكل تشريحية أو نتائج طبية محتملة. كن محدداً في المصطلحات الطبية."
+                }
+                
+                prompt = medical_prompts[detected_lang]
+                
+                inputs = st.session_state.processor(image, prompt, return_tensors="pt")
+                
+                # Generate response
+                with torch.no_grad():
+                    generated_ids = st.session_state.model.generate(**inputs, max_length=200, num_beams=5)
+                    generated_text = st.session_state.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                
+                # Translate medical terms if Arabic
+                if detected_lang == "ar":
+                    response = get_medical_translation(generated_text, detected_lang)
+                else:
+                    response = generated_text
+                
+                # Add medical context
+                response += "\n\n" + get_medical_response_template(detected_lang)
+                
+            else:
+                # Text-only response
+                response = get_medical_response_template(detected_lang, text_input)
+            
+            # Add bot response
+            bot_message = {
+                "role": "assistant",
+                "content": response,
+                "is_arabic": detected_lang == "ar"
+            }
+            st.session_state.messages.append(bot_message)
+            
+        except Exception as e:
+            error_msg = f"خطأ في التحليل: {str(e)}" if is_arabic else f"Analysis error: {str(e)}"
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": error_msg,
+                "is_arabic": is_arabic
+            })
+    
+    st.rerun()
+
+# Footer
+st.markdown("---")
+footer_text = "🏥 مساعد الصحة الذكي - تطوير بالذكاء الاصطناعي" if is_rtl else "🏥 AI Health Assistant - Powered by AI"
+if is_rtl:
+    st.markdown(f'<p class="arabic-text" style="text-align: center;">{footer_text}</p>', unsafe_allow_html=True)
+else:
+    st.markdown(f'<p style="text-align: center;">{footer_text}</p>', unsafe_allow_html=True)
