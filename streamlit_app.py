@@ -63,8 +63,9 @@ def load_blip2_model():
     try:
         processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
         model = Blip2ForConditionalGeneration.from_pretrained(
-        "Salesforce/blip2-flan-t5-xl",
-        torch_dtype=torch.float16 # Use half-precision to reduce memory usage
+        "Salesforce/blip2-opt-2.7b",
+        torch_dtype=torch.float16,
+        device_map="auto"
         )
         return processor, model
     except Exception as e:
