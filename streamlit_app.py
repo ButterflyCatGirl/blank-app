@@ -1,3 +1,10 @@
+if __name__ == "__main__":
+    import os
+    os.environ["STREAMLIT_SERVER_PORT"] = "8501"
+    os.environ["STREAMLIT_SERVER_ADDRESS"] = "0.0.0.0"
+    import streamlit.web.cli as cli
+    cli.main_run("app.py")
+
 import streamlit as st
 from PIL import Image
 import torch
@@ -164,3 +171,4 @@ if st.button(t["clear"]):
 # Footer
 st.markdown("---")
 st.markdown(f'<p style="text-align:center;">🏥 AI Health Assistant | Powered by BLIP2</p>', unsafe_allow_html=True)
+
