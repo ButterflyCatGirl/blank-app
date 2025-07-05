@@ -61,12 +61,8 @@ translations = {
 @st.cache_resource
 def load_blip2_model():
     try:
-        processor = Blip2Processor.from_pretrained("Salesforce/blip2-flan-t5-xl")
-        model = Blip2ForConditionalGeneration.from_pretrained(
-            "Salesforce/blip2-flan-t5-xl",
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto"
-        )
+        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+        model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b")
         return processor, model
     except Exception as e:
         st.error(f"Model load error: {str(e)}. Ensure internet access and sufficient memory.")
