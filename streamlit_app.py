@@ -68,7 +68,7 @@ translations = {
 @st.cache_resource
 def load_blip2_model():
     try:
-        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b", use_fast=True)
         model = Blip2ForConditionalGeneration.from_pretrained(
         "Salesforce/blip2-opt-2.7b",
         torch_dtype=torch.float16,
