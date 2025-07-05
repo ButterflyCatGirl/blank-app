@@ -1,4 +1,5 @@
 streamlit==1.29.0
 torch>=2.5.0
 transformers>=4.35.0
-pillow>=9.4.0
+pillow==9.4.0
+accelerate>=0.29.0  # Required for device_map and device context
