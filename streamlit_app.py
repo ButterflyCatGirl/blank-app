@@ -88,6 +88,48 @@ class MedicalVQASystem:
         except Exception as e:
             logger.error(f"Model loading failed: {str(e)}")
             return False
+     # Load translation models
+            try:
+                self.ar_en_tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
+                self.ar_en_model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
+                self.en_ar_tokenizer = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
+                self.en_ar_model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
+                logger.info("Translation models loaded successfully")
+            except Exception as e:
+                logger.warning(f"Translation models failed to load: {str(e)}")
+                # Continue without translation - we'll handle this gracefully
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Model loading failed: {str(e)}")
+            return False
+
+    def _detect_language(self, text: str) -> str:
+        """Detect if text is Arabic or English"""
+        arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+        return "ar" if arabic_chars > 0 else "en"
+
+    def _translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
+        """Translate text between Arabic and English"""
+        if source_lang == target_lang:
+            return text
+
+        try:
+            if source_lang == "ar" and target_lang == "en" and self.ar_en_tokenizer:
+                inputs = self.ar_en_tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                outputs = self.ar_en_model.generate(**inputs, max_length=512, num_beams=4, early_stopping=True)
+                return self.ar_en_tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+
+            elif source_lang == "en" and target_lang == "ar" and self.en_ar_tokenizer:
+                inputs = self.en_ar_tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                outputs = self.en_ar_model.generate(**inputs, max_length=512, num_beams=4, early_stopping=True)
+                return self.en_ar_tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+
+        except Exception as e:
+            logger.warning(f"Translation failed: {str(e)}")
+
+        return text  # Return original if translation fails        
 
     def _preprocess_image(self, image: Image.Image) -> Image.Image:
         """Preprocess image for optimal performance"""
