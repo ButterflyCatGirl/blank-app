@@ -1,174 +1,140 @@
-if __name__ == "__main__":
-    import os
-    os.environ["STREAMLIT_SERVER_PORT"] = "8501"
-    os.environ["STREAMLIT_SERVER_ADDRESS"] = "0.0.0.0"
-    import streamlit.web.cli as cli
-    cli.main_run("app.py")
-
 import streamlit as st
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, LlavaProcessor, LlavaForConditionalGeneration
 from PIL import Image
 import torch
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
+import langdetect
 
-# -----------------------------
-# Configuration & State Setup
-# -----------------------------
-st.set_page_config(page_title="AI Health Assistant", layout="wide", initial_sidebar_state="collapsed")
-
-# Language state
-if "language" not in st.session_state:
-    st.session_state.language = "en"
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "model_loaded" not in st.session_state:
-    st.session_state.model_loaded = False
-if "processor" not in st.session_state:
-    st.session_state.processor = None
-if "model" not in st.session_state:
-    st.session_state.model = None
-
-# Language toggle button
-col1, col2, col3 = st.columns([1, 2, 1])
-with col2:
-    if st.button("🇪🇬 العربية" if st.session_state.language == "en" else "🇺🇸 English"):
-        st.session_state.language = "ar" if st.session_state.language == "en" else "en"
-        st.rerun()
-
-# Translations
-translations = {
-    "en": {
-        "title": "🏥 AI Health Assistant",
-        "subtitle": "Your multilingual medical image analysis companion",
-        "welcome": "Hello! I'm your AI health assistant. Upload a medical image or ask a health question.",
-        "upload_prompt": "Upload a medical image (X-ray, CT scan, MRI, etc.)",
-        "text_input": "Ask your health question...",
-        "analyzing": "🔬 Analyzing your medical image...",
-        "disclaimer": "⚠️ Medical Disclaimer: This AI assistant provides general information only and should not replace professional medical advice. Always consult with qualified healthcare professionals for medical decisions.",
-        "loading_model": "🤖 Loading AI model... This may take a moment.",
-        "send": "Send",
-        "clear": "Clear Chat"
-    },
-    "ar": {
-        "title": "🏥 مساعد الصحة الذكي",
-        "subtitle": "رفيقك متعدد اللغات لتحليل الصور الطبية",
-        "welcome": "مرحباً! أنا مساعدك الصحي الذكي. ارفع صورة طبية أو اسأل سؤالاً صحياً.",
-        "upload_prompt": "ارفع صورة طبية (أشعة سينية، أشعة مقطعية، رنين مغناطيسي، إلخ)",
-        "text_input": "اسأل سؤالك الصحي...",
-        "analyzing": "🔬 جاري تحليل صورتك الطبية...",
-        "disclaimer": "⚠️ إخلاء مسؤولية طبية: يقدم هذا المساعد الذكي معلومات عامة فقط ولا يجب أن يحل محل المشورة الطبية المهنية. استشر دائماً أخصائيي الرعاية الصحية المؤهلين لاتخاذ القرارات الطبية.",
-        "loading_model": "🤖 جاري تحميل النموذج الذكي... قد يستغرق هذا بعض الوقت.",
-        "send": "إرسال",
-        "clear": "مسح المحادثة"
-    }
-}
-
-# -----------------------------
-# Model Loader (Cached)
-# -----------------------------
-@st.cache_resource
-def load_blip2_model():
+# --- Model Loading with Caching and Error Handling ---
+@st.cache_resource(ttl=3600)  # Cache for 1 hour
+def load_translation_models():
     try:
-        processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b", use_fast=True)
-        model = Blip2ForConditionalGeneration.from_pretrained(
-        "Salesforce/blip2-opt-2.7b",
-        torch_dtype=torch.float16,
-        device_map="auto"
-        )
-        return processor, model
+        ar_en_tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
+        ar_en_model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
+        en_ar_tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
+        en_ar_model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-en-ar")
+        return {
+            'ar_en': {'model': ar_en_model, 'tokenizer': ar_en_tokenizer},
+            'en_ar': {'model': en_ar_model, 'tokenizer': en_ar_tokenizer}
+        }
     except Exception as e:
-        st.error(f"Model load error: {str(e)}. Ensure internet access and sufficient memory.")
+        st.error(f"Error loading translation models: {str(e)}")
+        return None
+
+@st.cache_resource(ttl=3600)  # Cache for 1 hour
+def load_vqa_model():
+    try:
+        model_id = "llava-hf/llava-1.5-7b-hf"
+        processor = LlavaProcessor.from_pretrained(model_id)
+        model = LlavaForConditionalGeneration.from_pretrained(
+            model_id, 
+            torch_dtype=torch.float16, 
+            low_cpu_mem_usage=True
+        )
+        # Move model to GPU if available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        return model, processor
+    except Exception as e:
+        st.error(f"Error loading VQA model: {str(e)}")
         return None, None
 
-# Load model if not already loaded
-if not st.session_state.model_loaded:
-    with st.spinner(translations[st.session_state.language]["loading_model"]):
-        st.session_state.processor, st.session_state.model = load_blip2_model()
-        if st.session_state.processor and st.session_state.model:
-            st.session_state.model_loaded = True
-            st.success("✅ AI Model loaded successfully!")
+# Load models (cached to avoid reloading on each run)
+with st.spinner("Loading models (this may take a few minutes on first run)..."):
+    translation_models = load_translation_models()
+    vqa_model, vqa_processor = load_vqa_model()
 
-# -----------------------------
-# Medical Response Logic
-# -----------------------------
-def get_medical_response(query, image=None, lang="en"):
-    if image:
-        # Medical prompt engineering
-        prompt = {
-            "en": "This is a medical image. Describe findings, abnormalities, and potential diagnosis.",
-            "ar": "هذه صورة طبية. صف النتائج والتشوهات والتشخيص المحتمل."
-        }[lang]
-        
-        image = Image.open(image).convert("RGB")
-        inputs = st.session_state.processor(image, prompt, return_tensors="pt").to(st.session_state.model.device)
-        with torch.no_grad():
-            generated_ids = st.session_state.model.generate(**inputs, max_new_tokens=200)
-            response = st.session_state.processor.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        
-        # Add disclaimer
-        response += "\n\n⚠️ هذه النتائج تُعد معلومات عامة فقط، ويجب استشارة طبيب مختص قبل اتخاذ أي قرار طبي."
-        return response
-    else:
-        # Text-based response template
-        return {
-            "en": f"Your question: '{query}'\n\n⚠️ These results are for informational purposes only. Always consult a qualified healthcare provider.",
-            "ar": f"سؤالك: '{query}'\n\n⚠️ هذه النتائج تُعد معلومات عامة فقط، ويجب استشارة طبيب مختص قبل اتخاذ أي قرار طبي."
-        }[lang]
-
-# -----------------------------
-# UI Rendering
-# -----------------------------
-t = translations[st.session_state.language]
-is_rtl = st.session_state.language == "ar"
-
-# Title
-if is_rtl:
-    st.markdown(f'<h1 class="arabic-text">{t["title"]}</h1>', unsafe_allow_html=True)
+if translation_models and vqa_model and vqa_processor:
+    st.success("Models loaded successfully!")
 else:
-    st.title(t["title"])
+    st.error("Failed to load models. Check the error messages above.")
 
-# Disclaimer
-st.markdown(f'<div style="background:#fff3cd;padding:10px;border-radius:5px;">{t["disclaimer"]}</div>', unsafe_allow_html=True)
+# --- Helper Functions ---
+def detect_language(text):
+    """Detect if the text is in Arabic or English using langdetect."""
+    try:
+        lang = langdetect.detect(text)
+        return 'ar' if lang.startswith('ar') else 'en'
+    except:
+        # Fallback to simple character-based detection
+        arabic_chars = sum(1 for char in text if '\u0600' <= char <= '\u06FF' or '\u0750' <= char <= '\u077F')
+        english_chars = sum(1 for char in text.lower() if 'a' <= char <= 'z')
+        return 'ar' if arabic_chars > english_chars else 'en'
 
-# Chat history
-for msg in st.session_state.messages:
-    cls = "user" if msg["role"] == "user" else "assistant"
-    style = "margin-left:auto;background:#e3f2fd;" if cls == "user" else "background:#f5f5f5;"
-    if is_rtl:
-        style += "direction:rtl;text-align:right;"
-    st.markdown(f'<div style="{style}padding:10px;margin:5px 0;border-radius:8px;">{msg["content"]}</div>', unsafe_allow_html=True)
-    if "image" in msg:
-        st.image(msg["image"], width=300)
+def translate_text(text, source_lang, target_lang, translation_models):
+    """Translate text between English and Arabic."""
+    if source_lang == target_lang:
+        return text
+    model_key = f"{source_lang}_{target_lang}"
+    if model_key not in translation_models:
+        return text
+    model = translation_models[model_key]['model']
+    tokenizer = translation_models[model_key]['tokenizer']
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    translated = model.generate(**inputs)
+    return tokenizer.decode(translated[0], skip_special_tokens=True)
 
-# Input area
-col1, col2 = st.columns([4, 1])
-with col1:
-    user_text = st.text_input(t["text_input"], key="input_text")
-with col2:
-    uploaded_file = st.file_uploader(t["upload_prompt"], type=["jpg", "jpeg", "png"], label_visibility="collapsed")
-
-if st.button(t["send"]) and (user_text or uploaded_file):
-    # Add user message
-    st.session_state.messages.append({
-        "role": "user",
-        "content": user_text if user_text else ("صورة طبية" if is_rtl else "Medical Image"),
-        "image": uploaded_file
-    })
-
+def process_medical_vqa(image, question, model, processor, translation_models):
+    """Process the image and question through the VQA model with translation."""
+    # Detect input language
+    input_lang = detect_language(question)
+    
+    # Translate to English if needed (LLaVA expects English)
+    if input_lang == 'ar':
+        english_question = translate_text(question, 'ar', 'en', translation_models)
+    else:
+        english_question = question
+    
+    # Prepare inputs for LLaVA
+    prompt = f"<|begin_of_text|>USER: <image>\nQuestion: {english_question}\nAnswer: ASSISTANT:"
+    inputs = processor(prompt, images=image, return_tensors="pt").to(model.device)
+    
     # Generate response
-    with st.spinner(t["analyzing"]):
-        response = get_medical_response(user_text, uploaded_file, st.session_state.language)
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": response
-        })
-    st.rerun()
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            temperature=0.7,
+            do_sample=True
+        )
+    
+    # Decode the response
+    response = processor.decode(outputs[0], skip_special_tokens=True)
+    english_response = response.split("ASSISTANT:")[-1].strip()
+    
+    # Translate back to input language if needed
+    final_response = translate_text(english_response, 'en', 'ar', translation_models) if input_lang == 'ar' else english_response
+    
+    return final_response, input_lang
 
-# Clear chat
-if st.button(t["clear"]):
-    st.session_state.messages = []
-    st.rerun()
+# --- Streamlit Interface ---
+st.title("Medical Visual Question Answering (VQA)")
+st.markdown("Upload a medical image and ask a question in **English** or **Arabic**. This app uses a fine-tuned LLaVA model to provide answers.")
 
-# Footer
-st.markdown("---")
-st.markdown(f'<p style="text-align:center;">🏥 AI Health Assistant | Powered by BLIP2</p>', unsafe_allow_html=True)
+# Input section
+with st.form(key='vqa_form'):
+    image = st.file_uploader("Upload Medical Image", type=["jpg", "png", "jpeg"])
+    question = st.text_input("Question", placeholder="e.g., 'What abnormality is visible?' or 'ما هو الشذوذ المرئي؟'")
+    submit_button = st.form_submit_button(label="Get Answer")
 
+# Output section
+if submit_button:
+    if image is not None and question:
+        with st.spinner("Processing your request..."):
+            # Open the uploaded image
+            image_pil = Image.open(image).convert("RGB")
+            # Process the VQA request
+            response, detected_lang = process_medical_vqa(
+                image_pil, 
+                question, 
+                vqa_model, 
+                vqa_processor, 
+                translation_models
+            )
+            # Display results
+            st.image(image_pil, caption="Uploaded Image", use_column_width=True)
+            st.subheader("Answer")
+            st.write(response)
+            st.subheader("Detected Language")
+            st.write("Arabic" if detected_lang == 'ar' else "English")
+    else:
+        st.error("Please upload an image and enter a question.")
